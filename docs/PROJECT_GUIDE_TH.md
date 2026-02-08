@@ -20,6 +20,7 @@
 | Backend | **Spring Boot 4 + WebFlux** | สร้าง API แบบ Reactive (ไม่บล็อก thread) |
 | HTTP Client | **WebClient** | เรียก Binance API แบบ non-blocking |
 | Reactive | **Project Reactor** (Mono, Flux) | จัดการข้อมูลแบบ Stream / Async |
+| Database | **JDBC + H2** (JdbcTemplate) | เขียน/อ่าน DB ด้วย SQL ตรงๆ wrap Mono.fromCallable ไม่บล็อก event loop |
 | JSON | **Jackson** | แปลง JSON ↔ Java Object |
 | Frontend | HTML + CSS + JavaScript | หน้า Dashboard + polling ราคา |
 
@@ -214,6 +215,20 @@ src/main/java/.../CryptoBoard/
 
 ---
 
+#### Database Config (ไม่มี config class แยก)
+
+**ทำอะไร:**  
+Spring Boot จัดการเชื่อมต่อ H2 ให้อัตโนมัติจาก `application.properties`:
+- **DataSource (HikariCP)** — สร้าง connection pool ไปยัง H2 file database
+- **schema.sql** — Spring Boot รัน `schema.sql` ตอนเริ่มแอปอัตโนมัติ (ตั้ง `spring.sql.init.mode=always`)
+
+**เทคนิค:**
+- **Spring Boot Auto-configuration** — ไม่ต้องเขียน config class เอง แค่ตั้งค่าใน `application.properties`
+- **HikariCP** — connection pool ที่ Spring Boot ใช้เป็น default
+- Spring Boot สร้าง `JdbcTemplate` จาก DataSource ให้อัตโนมัติ
+
+---
+
 ### 4.6 การตั้งค่า
 
 #### `application.properties`
@@ -263,6 +278,7 @@ Frontend ใช้ **polling** (fetch แล้ว setInterval) เพื่อ�
 | **SOLID – DIP** | Controller ขึ้นกับ GetCryptoPricesUseCase; GetCryptoPricesService ขึ้นกับ CryptoPriceProvider (interface) | เปลี่ยน implementation ได้ ไม่ผูกกับ Binance |
 | **Reactive (Mono/Flux)** | ทุกชั้นที่เกี่ยวกับ I/O | Non-blocking ไม่บล็อก thread |
 | **WebClient + Retry + Timeout** | BinancePriceProvider | ดึงข้อมูลภายนอกอย่างปลอดภัยและทนต่อความล้มเหลว |
+| **JDBC + Mono.fromCallable** | PriceHistoryPersistenceAdapter | เขียน/อ่าน DB ด้วย JdbcTemplate + wrap Mono.fromCallable ไม่บล็อก event loop |
 | **Polling (fetch + setInterval)** | index.html | Frontend ดึงราคาซ้ำเป็นระยะ ไม่ใช้ SSE |
 | **DTO แยก (CryptoPrice vs BinanceTicker)** | dto package | รูปแบบข้อมูลภายในไม่ยึดติดกับ Binance |
 | **Constructor Injection** | ทุก Service / Controller | ทดสอบด้วย mock ได้ง่าย และ dependencies ชัดเจน |
@@ -298,27 +314,37 @@ Frontend ใช้ **polling** (fetch แล้ว setInterval) เพื่อ�
 
 โปรเจครองรับการเก็บ snapshot ราคาลงฐานข้อมูลเพื่อใช้ดูประวัติหรือทำกราฟ
 
-### สิ่งที่เพิ่มเข้ามา
+### สิ่งที่ใช้
 
-| สิ่งที่เพิ่ม | หน้าที่ |
+| สิ่งที่ใช้ | หน้าที่ |
 |-------------|--------|
-| **spring-boot-starter-data-r2dbc** + **r2dbc-h2** | Reactive DB (ไม่บล็อก thread) ใช้ H2 เก็บไฟล์ในโฟลเดอร์ `data/` |
-| **Entity: PriceSnapshot** | โมเดลแถวในตาราง `price_snapshot` (symbol, price, change_24h, volume_24h, recorded_at) |
-| **Repository: PriceSnapshotRepository** | อ่าน/เขียน DB แบบ Reactive (ReactiveCrudRepository + query ล่าสุด / ช่วงเวลา) |
-| **Service: PriceHistoryService** | บันทึก CryptoPrice → PriceSnapshot, query ประวัติตาม symbol / ช่วงเวลา |
+| **spring-boot-starter-jdbc** + **h2** | JDBC + H2 file database เก็บข้อมูลในโฟลเดอร์ `data/` |
+| **JdbcTemplate** | เขียน SQL ตรงๆ (INSERT/SELECT) wrap ด้วย `Mono.fromCallable` ไม่บล็อก event loop |
+| **Domain: PriceSnapshot** | Domain entity สำหรับ snapshot ราคา (symbol, price, change_24h, volume_24h, recorded_at) |
+| **Adapter: PriceHistoryPersistenceAdapter** | ใช้ JdbcTemplate เขียน SQL ตรงๆ + wrap Mono.fromCallable เพื่อบันทึก/อ่าน snapshot จาก DB — implement ทั้ง SavePriceHistoryPort และ LoadPriceHistoryPort |
 | **Config: PriceStreamPersistence** | ใช้ @Scheduled เรียก getAllPrices() เป็นระยะ แล้วบันทึก snapshot ลง DB แบบ non-blocking (ปิดได้ด้วย `crypto.history.enabled=false`) |
-| **Config: R2dbcConfig** | รัน `schema.sql` ตอนเริ่มแอป สร้างตาราง `price_snapshot` ถ้ายังไม่มี |
+| **schema.sql** | Spring Boot รันอัตโนมัติตอนเริ่มแอป สร้างตาราง `price_snapshot` ถ้ายังไม่มี |
 | **API: GET /api/crypto/history/{symbol}?limit=100** | ดึงประวัติราคาล่าสุด (สำหรับกราฟ) |
 | **API: GET /api/crypto/history/{symbol}/range?from=...&to=...** | ดึงประวัติในช่วงเวลา (from/to เป็น ISO-8601) |
 
+### ทำไมใช้ JDBC แทน R2DBC?
+
+R2DBC บน Spring Boot 4.x มีปัญหา **dialect resolution** — ระบบ resolve dialect ผิด ทำให้เกิด "bad SQL grammar" error แก้ยากเพราะ auto-configuration หลายชั้น
+
+การใช้ JDBC + `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())`:
+- **ไม่บล็อก event loop** — JDBC blocking ถูก offload ไปรันบน elastic thread pool แยก
+- ง่าย dependency น้อย ไม่มีปัญหา dialect
+- ควบคุม SQL ได้เต็มที่ ไม่ต้องพึ่ง ORM
+
 ### Config ที่เกี่ยวข้อง (application.properties)
 
-- `spring.r2dbc.url=r2dbc:h2:file:///./data/cryptoboard` — เก็บข้อมูลในไฟล์ใต้โฟลเดอร์ `data/`
+- `spring.datasource.url=jdbc:h2:file:./data/cryptoboard;AUTO_SERVER=TRUE` — เก็บข้อมูลในไฟล์ใต้โฟลเดอร์ `data/`
+- `spring.sql.init.mode=always` — รัน schema.sql ทุกครั้งที่เริ่มแอป
 - `crypto.history.enabled=true` — เปิด/ปิดการบันทึกราคาลง DB (scheduled)
 
 ### เทคนิคที่ใช้ (รวม SOLID)
 
-- **R2DBC** — คงสไตล์ Reactive ทั้งสาย ไม่บล็อก I/O ตอนเขียน/อ่าน DB  
+- **JDBC + Mono.fromCallable** — ใช้ JdbcTemplate เขียน SQL ตรงๆ แล้ว wrap ด้วย `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())` เพื่อไม่บล็อก Netty event loop  
 - **แยกชั้น persistence** — การบันทึกอยู่ที่ PriceHistoryPersistenceAdapter และ PriceStreamPersistence ไม่ปนกับ GetCryptoPricesService  
 - **บันทึกแบบ scheduled** — ใช้ `@Scheduled` เรียก getAllPrices() เป็นระยะ แล้ว saveAll() ลง DB แบบ non-blocking  
-- **DIP + ISP** — Controller ขึ้นกับ `PriceHistoryReader` (อ่านประวัติ), PriceStreamPersistence ขึ้นกับ `PriceHistoryWriter` (เขียนประวัติ) ไม่ขึ้นกับ concrete `PriceHistoryService` โดยตรง
+- **DIP + ISP** — Controller ขึ้นกับ `LoadPriceHistoryPort` (อ่านประวัติ), PriceStreamPersistence ขึ้นกับ `SavePriceHistoryPort` (เขียนประวัติ) ไม่ขึ้นกับ concrete PriceHistoryPersistenceAdapter โดยตรง

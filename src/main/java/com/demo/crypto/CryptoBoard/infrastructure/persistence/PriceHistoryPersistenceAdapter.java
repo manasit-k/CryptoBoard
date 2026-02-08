@@ -3,37 +3,42 @@ package com.demo.crypto.CryptoBoard.infrastructure.persistence;
 import com.demo.crypto.CryptoBoard.application.port.out.LoadPriceHistoryPort;
 import com.demo.crypto.CryptoBoard.application.port.out.SavePriceHistoryPort;
 import com.demo.crypto.CryptoBoard.domain.PriceSnapshot;
-import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
+import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
 
 /**
- * Adapter: ใช้ DatabaseClient เขียน SQL ตรงๆ (non-blocking)
- * ไม่พึ่ง Spring Data R2DBC Repository — หลีกเลี่ยงปัญหา dialect/bind-marker
+ * Adapter: ใช้ JdbcTemplate เขียน SQL ตรงๆ
+ * wrap ด้วย Mono.fromCallable + Schedulers.boundedElastic เพื่อไม่บล็อก event loop
  */
 @Component
 public class PriceHistoryPersistenceAdapter implements SavePriceHistoryPort, LoadPriceHistoryPort {
 
-    private final DatabaseClient db;
+    private final JdbcTemplate jdbc;
 
-    public PriceHistoryPersistenceAdapter(DatabaseClient db) {
-        this.db = db;
+    public PriceHistoryPersistenceAdapter(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
     }
 
     @Override
     public Mono<PriceSnapshot> save(PriceSnapshot snapshot) {
-        return db.sql("INSERT INTO price_snapshot (symbol, price, change_24h, volume_24h, recorded_at) VALUES (?, ?, ?, ?, ?)")
-                .bind(0, snapshot.getSymbol())
-                .bind(1, snapshot.getPrice())
-                .bind(2, snapshot.getChange24h() != null ? snapshot.getChange24h() : "")
-                .bind(3, snapshot.getVolume24h() != null ? snapshot.getVolume24h() : "")
-                .bind(4, snapshot.getRecordedAt())
-                .fetch()
-                .rowsUpdated()
-                .thenReturn(snapshot);
+        return Mono.fromCallable(() -> {
+            jdbc.update(
+                    "INSERT INTO price_snapshot (symbol, price, change_24h, volume_24h, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                    snapshot.getSymbol(),
+                    snapshot.getPrice(),
+                    snapshot.getChange24h() != null ? snapshot.getChange24h() : "",
+                    snapshot.getVolume24h() != null ? snapshot.getVolume24h() : "",
+                    Timestamp.from(snapshot.getRecordedAt())
+            );
+            return snapshot;
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     @Override
@@ -48,34 +53,39 @@ public class PriceHistoryPersistenceAdapter implements SavePriceHistoryPort, Loa
 
     @Override
     public Flux<PriceSnapshot> findHistoryBySymbol(String symbol, int limit) {
-        return db.sql("SELECT * FROM price_snapshot WHERE symbol = ? ORDER BY recorded_at DESC LIMIT ?")
-                .bind(0, symbol)
-                .bind(1, limit)
-                .map(row -> PriceSnapshot.withId(
-                        row.get("id", Long.class),
-                        row.get("symbol", String.class),
-                        row.get("price", String.class),
-                        row.get("change_24h", String.class),
-                        row.get("volume_24h", String.class),
-                        row.get("recorded_at", Instant.class)
-                ))
-                .all();
+        return Mono.fromCallable(() -> {
+            List<PriceSnapshot> list = jdbc.query(
+                    "SELECT * FROM price_snapshot WHERE symbol = ? ORDER BY recorded_at DESC LIMIT ?",
+                    (rs, rowNum) -> PriceSnapshot.withId(
+                            rs.getLong("id"),
+                            rs.getString("symbol"),
+                            rs.getString("price"),
+                            rs.getString("change_24h"),
+                            rs.getString("volume_24h"),
+                            rs.getTimestamp("recorded_at").toInstant()
+                    ),
+                    symbol, limit
+            );
+            return list;
+        }).subscribeOn(Schedulers.boundedElastic()).flatMapMany(Flux::fromIterable);
     }
 
     @Override
     public Flux<PriceSnapshot> findHistoryBySymbolBetween(String symbol, Instant from, Instant to) {
-        return db.sql("SELECT * FROM price_snapshot WHERE symbol = ? AND recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at ASC")
-                .bind(0, symbol)
-                .bind(1, from)
-                .bind(2, to)
-                .map(row -> PriceSnapshot.withId(
-                        row.get("id", Long.class),
-                        row.get("symbol", String.class),
-                        row.get("price", String.class),
-                        row.get("change_24h", String.class),
-                        row.get("volume_24h", String.class),
-                        row.get("recorded_at", Instant.class)
-                ))
-                .all();
+        return Mono.fromCallable(() -> {
+            List<PriceSnapshot> list = jdbc.query(
+                    "SELECT * FROM price_snapshot WHERE symbol = ? AND recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at ASC",
+                    (rs, rowNum) -> PriceSnapshot.withId(
+                            rs.getLong("id"),
+                            rs.getString("symbol"),
+                            rs.getString("price"),
+                            rs.getString("change_24h"),
+                            rs.getString("volume_24h"),
+                            rs.getTimestamp("recorded_at").toInstant()
+                    ),
+                    symbol, Timestamp.from(from), Timestamp.from(to)
+            );
+            return list;
+        }).subscribeOn(Schedulers.boundedElastic()).flatMapMany(Flux::fromIterable);
     }
 }

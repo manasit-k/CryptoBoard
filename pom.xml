@@ -40,14 +40,14 @@
 			<artifactId>jackson-databind</artifactId>
 		</dependency>
 
-		<!-- Reactive Database (R2DBC) — ใช้แค่ DatabaseClient เขียน SQL ตรงๆ (non-blocking) -->
+		<!-- JDBC + H2 — เก็บประวัติราคา (wrap ด้วย Mono.fromCallable เพื่อไม่บล็อก event loop) -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-r2dbc</artifactId>
+			<artifactId>spring-boot-starter-jdbc</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.r2dbc</groupId>
-			<artifactId>r2dbc-h2</artifactId>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 		</dependency>
 
 		<dependency>
