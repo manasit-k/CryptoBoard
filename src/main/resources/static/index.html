@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+
+        .status.connected {
+            background-color: #4caf50;
+            color: white;
+        }
+
+        .status.disconnected {
+            background-color: #f44336;
+            color: white;
+        }
+
+        .crypto-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .crypto-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .crypto-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .crypto-card.updating {
+            animation: pulse 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                background-color: white;
+            }
+            50% {
+                background-color: #e3f2fd;
+            }
+        }
+
+        .crypto-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .crypto-symbol {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .crypto-price {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+            margin: 10px 0;
+        }
+
+        .crypto-change {
+            font-size: 1.1em;
+            padding: 5px 10px;
+            border-radius: 5px;
+            display: inline-block;
+        }
+
+        .crypto-change.positive {
+            background-color: #c8e6c9;
+            color: #2e7d32;
+        }
+
+        .crypto-change.negative {
+            background-color: #ffcdd2;
+            color: #c62828;
+        }
+
+        .crypto-info {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            color: #666;
+        }
+
+        .info-label {
+            font-weight: 500;
+        }
+
+        .timestamp {
+            text-align: center;
+            color: rgba(255,255,255,0.8);
+            margin-top: 20px;
+            font-size: 0.9em;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.2em;
+            margin-top: 50px;
+        }
+
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Crypto Dashboard</h1>
+            <div id="status" class="status disconnected">-</div>
+        </header>
+
+        <div id="error-container"></div>
+        <div id="loading" class="loading">กำลังเชื่อมต่อกับ Server...</div>
+        <div id="crypto-container" class="crypto-grid"></div>
+        <div class="timestamp">
+            <div>อัปเดตล่าสุด: <span id="last-update">-</span></div>
+        </div>
+    </div>
+
+    <script>
+        const cryptoContainer = document.getElementById('crypto-container');
+        const statusElement = document.getElementById('status');
+        const loadingElement = document.getElementById('loading');
+        const errorContainer = document.getElementById('error-container');
+        const lastUpdateElement = document.getElementById('last-update');
+
+        const POLL_INTERVAL_MS = 3000;
+        const cryptoData = new Map();
+
+        // ฟังก์ชันสำหรับฟอร์แมตตัวเลข
+        function formatNumber(num) {
+            if (!num) return 'N/A';
+            const number = parseFloat(num);
+            if (number >= 1e9) {
+                return (number / 1e9).toFixed(2) + 'B';
+            } else if (number >= 1e6) {
+                return (number / 1e6).toFixed(2) + 'M';
+            } else if (number >= 1e3) {
+                return (number / 1e3).toFixed(2) + 'K';
+            }
+            return number.toFixed(2);
+        }
+
+        // ฟังก์ชันสำหรับฟอร์แมตราคา
+        function formatPrice(price) {
+            if (!price) return 'N/A';
+            const num = parseFloat(price);
+            if (num >= 1) {
+                return num.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            } else {
+                return num.toFixed(8);
+            }
+        }
+
+        // ฟังก์ชันสำหรับสร้างหรืออัปเดต Crypto Card (อัปเดตเฉพาะ field เพื่อลดการกระพริบ)
+        function updateCryptoCard(priceData) {
+            const symbol = priceData.symbol;
+            const existingCard = document.getElementById(`crypto-${symbol}`);
+            
+            const change24h = parseFloat(priceData.change24h || 0);
+            const changeClass = change24h >= 0 ? 'positive' : 'negative';
+            const changeSign = change24h >= 0 ? '+' : '';
+
+            if (existingCard) {
+                const priceEl = existingCard.querySelector('.crypto-price');
+                const changeEl = existingCard.querySelector('.crypto-change');
+                const volumeEl = existingCard.querySelector('.crypto-info .info-row span:last-child');
+
+                if (priceEl) {
+                    priceEl.textContent = `$${formatPrice(priceData.price)}`;
+                }
+                if (changeEl) {
+                    changeEl.className = `crypto-change ${changeClass}`;
+                    changeEl.textContent = `${changeSign}${change24h.toFixed(2)}%`;
+                }
+                if (volumeEl) {
+                    volumeEl.textContent = formatNumber(priceData.volume24h);
+                }
+
+                existingCard.classList.add('updating');
+                setTimeout(() => {
+                    existingCard.classList.remove('updating');
+                }, 500);
+            } else {
+                // สร้างการ์ดใหม่
+                const cardHTML = `
+                    <div class="crypto-card" id="crypto-${symbol}">
+                        <div class="crypto-header">
+                            <div class="crypto-symbol">${symbol.replace('USDT', '')}</div>
+                        </div>
+                        <div class="crypto-price">$${formatPrice(priceData.price)}</div>
+                        <div class="crypto-change ${changeClass}">
+                            ${changeSign}${change24h.toFixed(2)}%
+                        </div>
+                        <div class="crypto-info">
+                            <div class="info-row">
+                                <span class="info-label">Volume 24h:</span>
+                                <span>${formatNumber(priceData.volume24h)}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                cryptoContainer.insertAdjacentHTML('beforeend', cardHTML);
+            }
+
+            cryptoData.set(symbol, priceData);
+        }
+
+        // ฟังก์ชันสำหรับอัปเดตเวลา
+        function updateTimestamp() {
+            const now = new Date();
+            lastUpdateElement.textContent = now.toLocaleTimeString('th-TH');
+        }
+
+        // ฟังก์ชันสำหรับแสดงข้อผิดพลาด
+        function showError(message) {
+            errorContainer.innerHTML = `<div class="error">⚠️ ${message}</div>`;
+        }
+
+        function clearError() {
+            errorContainer.innerHTML = '';
+        }
+
+        // ดึงราคาครั้งเดียว (non-blocking ฝั่ง server)
+        function fetchPrices() {
+            fetch('/api/crypto/prices')
+                .then(res => {
+                    if (!res.ok) throw new Error('Network error');
+                    return res.json();
+                })
+                .then(prices => {
+                    if (!Array.isArray(prices)) return;
+                    statusElement.textContent = 'OK';
+                    statusElement.className = 'status connected';
+                    loadingElement.style.display = 'none';
+                    clearError();
+                    prices.forEach(updateCryptoCard);
+                    updateTimestamp();
+                })
+                .catch(err => {
+                    showError(err.message || 'เกิดข้อผิดพลาดในการรับข้อมูล');
+                    statusElement.textContent = 'Error';
+                    statusElement.className = 'status disconnected';
+                });
+        }
+
+        // โหลดครั้งแรก แล้ว poll ทุก POLL_INTERVAL_MS
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchPrices();
+            setInterval(fetchPrices, POLL_INTERVAL_MS);
+        });
+    </script>
+</body>
+</html>
