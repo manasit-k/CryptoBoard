@@ -10,6 +10,7 @@
 - ดึงราคาจาก Binance API
 - API ดึงราคาแบบ **non-blocking** (Mono/Flux) Frontend ใช้ polling อัปเดตเป็นระยะ
 - มี REST API สำหรับดึงราคาแบบครั้งเดียวด้วย
+- เก็บ snapshot ราคาลง H2 Database เพื่อดูประวัติ
 
 ---
 
@@ -24,22 +25,54 @@
 | JSON | **Jackson** | แปลง JSON ↔ Java Object |
 | Frontend | HTML + CSS + JavaScript | หน้า Dashboard + polling ราคา |
 
-**ทำไมใช้ WebFlux ไม่ใช้ Spring MVC?**
+**ทำไมใช้ WebFlux ไม่ใช่ Spring MVC?**
 - WebFlux เป็น **Non-blocking** เหมาะกับงานที่รอ I/O บ่อย (เรียก API ภายนอก, Stream)
 - ใช้ทรัพยากรน้อยกว่าเมื่อมี request เยอะ (non-blocking ไม่บล็อก thread)
 
 ---
 
-## 3. โครงสร้างโปรเจค (โฟลเดอร์และความรับผิดชอบ)
+## 3. สถาปัตยกรรม (Hexagonal Architecture)
+
+โปรเจคใช้สถาปัตยกรรมแบบ **Hexagonal (Ports & Adapters)** แบ่งชั้นชัดเจน:
 
 ```
-src/main/java/.../CryptoBoard/
-├── CryptoBoardApplication.java   → จุดเข้าแอป (main)
-├── config/                       → การตั้งค่า Bean (WebClient, ObjectMapper)
-├── controller/                   → รับ HTTP request ส่งต่อให้ Service
-├── dto/                          → Data Transfer Object (รูปแบบข้อมูล)
-└── service/                      → Logic การดึง/Stream ราคา
+src/main/java/com/demo/crypto/CryptoBoard/
+├── CryptoBoardApplication.java              → จุดเข้าแอป (main)
+├── domain/                                  → Domain Entity (pure POJO ไม่พึ่ง framework)
+│   └── PriceSnapshot.java
+├── application/                             → Application Layer (use case + port + dto)
+│   ├── dto/
+│   │   └── CryptoPrice.java                → DTO ราคาภายในระบบ
+│   ├── port/
+│   │   ├── in/                             → Inbound Ports (use case interface)
+│   │   │   ├── GetCryptoPricesUseCase.java
+│   │   │   └── GetPriceHistoryUseCase.java
+│   │   └── out/                            → Outbound Ports (infrastructure interface)
+│   │       ├── CryptoPriceProviderPort.java
+│   │       ├── LoadPriceHistoryPort.java
+│   │       └── SavePriceHistoryPort.java
+│   └── service/                            → Use Case Implementation
+│       ├── GetCryptoPricesService.java
+│       └── GetPriceHistoryService.java
+├── infrastructure/                          → Adapter สำหรับเชื่อมต่อภายนอก
+│   ├── external/                           → External API Adapter
+│   │   ├── BinancePriceProvider.java
+│   │   └── BinanceTicker.java
+│   └── persistence/                        → Database Adapter
+│       └── PriceHistoryPersistenceAdapter.java
+├── interfaces/                              → Inbound Adapter (HTTP)
+│   └── web/
+│       └── CryptoController.java
+└── config/                                  → Configuration
+    ├── WebClientConfig.java
+    └── PriceStreamPersistence.java
 ```
+
+**หลักการ:**
+- **Domain** อยู่ตรงกลาง ไม่พึ่ง framework ใดๆ
+- **Application** กำหนด use case (port in) และ port out สำหรับเรียกใช้ infrastructure
+- **Infrastructure** implement port out (เช่น Binance adapter, DB adapter)
+- **Interfaces** เป็น inbound adapter รับ HTTP request แล้วเรียก use case
 
 ---
 
@@ -50,19 +83,42 @@ src/main/java/.../CryptoBoard/
 #### `CryptoBoardApplication.java`
 
 **ทำอะไร:**  
-เป็นคลาสหลักที่รัน Spring Boot แค่ประกาศ `@SpringBootApplication` และเรียก `SpringApplication.run(...)`  
+เป็นคลาสหลักที่รัน Spring Boot ประกาศ `@SpringBootApplication` + `@EnableScheduling` และเรียก `SpringApplication.run(...)`
 
 **เทคนิค:**
-- **Spring Boot Auto-configuration** — Spring จะสแกน package นี้และ sub-package แล้วสร้าง Bean (Controller, Service, Config) ให้อัตโนมัติ
+- **Spring Boot Auto-configuration** — Spring จะสแกน package นี้และ sub-package แล้วสร้าง Bean ให้อัตโนมัติ
+- **@EnableScheduling** — เปิดใช้งาน `@Scheduled` สำหรับบันทึกราคาลง DB เป็นระยะ
 
 ---
 
-### 4.2 DTO (Data Transfer Object) — รูปแบบข้อมูล
+### 4.2 Domain Layer
+
+#### `PriceSnapshot.java`
+
+**ทำอะไร:**  
+เป็น Domain Entity สำหรับ snapshot ราคา Crypto ที่เก็บลง Database — เป็น pure POJO ไม่พึ่ง framework
+
+**Field:**
+- `id` (Long) — primary key จาก DB
+- `symbol` (String) — สัญลักษณ์ เช่น BTCUSDT
+- `price` (String) — ราคา
+- `change24h` (String) — การเปลี่ยนแปลง 24 ชม. (%)
+- `volume24h` (String) — Volume 24 ชม.
+- `recordedAt` (Instant) — เวลาที่บันทึก
+
+**เทคนิค:**
+- **Pure POJO** — ไม่มี annotation ของ framework ใดๆ ใช้ได้ทุกชั้น
+- **Static Factory Method** — `PriceSnapshot.withId(...)` สำหรับโหลดจาก DB (มี id)
+- **Immutable fields** — field หลัก (symbol, price, etc.) เป็น `final` ไม่เปลี่ยนหลังสร้าง
+
+---
+
+### 4.3 Application Layer — DTO
 
 #### `CryptoPrice.java`
 
 **ทำอะไร:**  
-เป็นโมเดลข้อมูลราคาที่ใช้ทั้งในระบบ (ไม่ยึดติดกับ Binance) เก็บ:
+เป็น DTO ราคาที่ใช้ภายในระบบ (ไม่ยึดติดกับ Binance) เก็บ:
 - `symbol` — สัญลักษณ์ เช่น BTCUSDT
 - `price` — ราคา
 - `change24h` — การเปลี่ยนแปลง 24 ชม. (%)
@@ -70,134 +126,176 @@ src/main/java/.../CryptoBoard/
 - `timestamp` — เวลาที่ได้ข้อมูล
 
 **เทคนิค:**
-- **Plain DTO** — ไม่มี logic ซับซ้อน มีแค่ field + getter/setter
-- **@JsonIgnoreProperties(ignoreUnknown = true)** — เวลา Jackson แปลง JSON เป็น object ถ้ามี field ที่ไม่มีในคลาสจะไม่ error (กัน API เปลี่ยนรูปแบบ)
-- **หลาย Constructor** — ให้เลือกสร้างแบบสั้น (symbol+price) หรือแบบเต็ม ตาม use case
+- **@JsonIgnoreProperties(ignoreUnknown = true)** — เวลา Jackson แปลง JSON ถ้ามี field ที่ไม่มีในคลาสจะไม่ error
+- **หลาย Constructor** — ให้เลือกสร้างแบบสั้น (symbol+price) หรือแบบเต็ม
 
 **ทำไมต้องมี DTO แยก?**  
-เพื่อให้รูปแบบข้อมูลภายในแอปเป็นมาตรฐานเดียว ถ้าอนาคตเปลี่ยนไปดึงจาก CoinGecko หรือ Kraken ก็ยังส่ง `CryptoPrice` ออกไปได้ โดยไม่ให้ฝั่ง API/Frontend รู้ว่าแหล่งข้อมูลคืออะไร (ลด coupling)
+เพื่อให้รูปแบบข้อมูลภายในแอปเป็นมาตรฐานเดียว ถ้าอนาคตเปลี่ยนไปดึงจาก Exchange อื่น ก็ยังส่ง `CryptoPrice` ออกไปได้ (ลด coupling)
 
 ---
+
+### 4.4 Application Layer — Inbound Ports (Use Case Interface)
+
+#### `GetCryptoPricesUseCase.java`
+
+**ทำอะไร:**  
+กำหนดว่า "บริการดึงราคา" ต้องมี operations อะไรบ้าง:
+- `Flux<CryptoPrice> getAllPrices()` — ดึงราคาทุกเหรียญ
+- `Mono<CryptoPrice> getPrice(String symbol)` — ดึงราคาเหรียญเดียว
+- `List<String> getAvailableSymbols()` — บอกสัญลักษณ์ที่รองรับ
+
+**เทคนิค:**
+- **Dependency Inversion** — Controller ขึ้นกับ interface นี้เท่านั้น ไม่รู้ implementation
+
+---
+
+#### `GetPriceHistoryUseCase.java`
+
+**ทำอะไร:**  
+กำหนดว่า "บริการประวัติราคา" ต้องมี operations อะไรบ้าง:
+- `Flux<PriceSnapshot> findHistoryBySymbol(String symbol, int limit)` — ดึงประวัติราคาล่าสุด
+- `Flux<PriceSnapshot> findHistoryBySymbolBetween(String symbol, Instant from, Instant to)` — ดึงประวัติในช่วงเวลา
+
+---
+
+### 4.5 Application Layer — Outbound Ports (Infrastructure Interface)
+
+#### `CryptoPriceProviderPort.java`
+
+**ทำอะไร:**  
+กำหนดว่า "ผู้ให้บริการราคา" (Exchange adapter) ต้องทำอะไรได้บ้าง:
+- `Mono<CryptoPrice> getPrice(String symbol)`
+- `Flux<CryptoPrice> getAllPrices()`
+- `String getExchangeName()`
+
+**เทคนิค:**
+- **Dependency Inversion (SOLID)** — Service ขึ้นกับ interface นี้ ไม่ขึ้นกับ Binance โดยตรง
+- **Open/Closed Principle** — เพิ่ม Exchange ใหม่ = สร้าง class ใหม่ที่ implement port นี้
+
+---
+
+#### `SavePriceHistoryPort.java`
+
+**ทำอะไร:**  
+กำหนด interface สำหรับ **เขียน** ประวัติราคาลง DB:
+- `Mono<PriceSnapshot> save(PriceSnapshot snapshot)`
+- `Flux<PriceSnapshot> saveAll(Flux<PriceSnapshot> snapshots)`
+
+---
+
+#### `LoadPriceHistoryPort.java`
+
+**ทำอะไร:**  
+กำหนด interface สำหรับ **อ่าน** ประวัติราคาจาก DB:
+- `Flux<PriceSnapshot> findHistoryBySymbol(String symbol, int limit)`
+- `Flux<PriceSnapshot> findHistoryBySymbolBetween(String symbol, Instant from, Instant to)`
+
+**เทคนิค (ISP):**  
+แยก Save กับ Load เป็นคนละ interface — client ใช้แค่ interface ที่ต้องการ (Interface Segregation Principle)
+
+---
+
+### 4.6 Application Layer — Service (Use Case Implementation)
+
+#### `GetCryptoPricesService.java`
+
+**ทำอะไร:**  
+implement `GetCryptoPricesUseCase` — ทำหน้าที่ orchestration โดยเรียก `CryptoPriceProviderPort` (ตอนรันจริงคือ BinancePriceProvider)
+
+**เทคนิค:**
+- **@Service** — Bean สำหรับ business logic
+- **Dependency Inversion** — รับ `CryptoPriceProviderPort` (interface) ใน constructor
+- **Constructor Injection** — รับ provider + symbols จาก config
+
+---
+
+#### `GetPriceHistoryService.java`
+
+**ทำอะไร:**  
+implement `GetPriceHistoryUseCase` — ดึงประวัติราคาจาก `LoadPriceHistoryPort`
+
+**เทคนิค:**
+- **Validation** — จำกัด limit สูงสุด 1000 และ default 100
+- **Dependency Inversion** — รับ `LoadPriceHistoryPort` (interface) ใน constructor
+
+---
+
+### 4.7 Infrastructure Layer — External Adapter
 
 #### `BinanceTicker.java`
 
 **ทำอะไร:**  
-เป็นโมเดลที่ตรงกับ **รูปแบบ JSON ที่ Binance API ส่งกลับมา** (เช่นจาก endpoint `/api/v3/ticker/24hr`) เก็บ field ตามที่ Binance ใช้
+เป็น DTO ที่ตรงกับ **รูปแบบ JSON ที่ Binance API ส่งกลับ** (จาก endpoint `/api/v3/ticker/24hr`)
 
 **เทคนิค:**
-- **@JsonProperty("ชื่อ field ใน JSON")** — บอก Jackson ว่า field ใน JSON ชื่ออะไร map กับ field ตัวไหน (เช่น JSON เป็น `priceChangePercent` → เก็บใน `priceChangePercent`)
-- **@JsonIgnoreProperties(ignoreUnknown = true)** — เหมือนใน CryptoPrice กันกรณี Binance เพิ่ม field ใหม่
+- **@JsonProperty("ชื่อ field ใน JSON")** — บอก Jackson ว่า field ใน JSON map กับ field ตัวไหน
+- **@JsonIgnoreProperties(ignoreUnknown = true)** — กัน Binance เพิ่ม field ใหม่แล้ว error
 
 **ทำไมต้องแยกจาก CryptoPrice?**  
-เพราะ Binance ใช้ชื่อ field ไม่ตรงกับที่เราอยากใช้ในแอป (เช่น `priceChangePercent` ไม่ใช่ `change24h`) การมี BinanceTicker แยกไว้ทำให้การ “แปลงจาก Binance → CryptoPrice” อยู่ที่เดียว (ใน BinancePriceProvider) และถ้าเปลี่ยน Exchange ก็แค่มี DTO ใหม่ของ Exchange นั้น
+เพราะ Binance ใช้ชื่อ field ไม่ตรงกับที่เราอยากใช้ (เช่น `priceChangePercent` ไม่ใช่ `change24h`) การแยกทำให้ "แปลงจาก Binance → CryptoPrice" อยู่ที่เดียว
 
 ---
 
-### 4.3 Service Layer — Logic และการดึงข้อมูล
-
-#### `CryptoPriceProvider.java` (Interface)
+#### `BinancePriceProvider.java`
 
 **ทำอะไร:**  
-เป็น **interface** ที่กำหนดว่า “ผู้ให้บริการราคา” ต้องทำอะไรได้บ้าง:
-- ดึงราคาเหรียญเดียว: `Mono<CryptoPrice> getPrice(String symbol)`
-- ดึงราคาหลายเหรียญ: `Flux<CryptoPrice> getAllPrices()`
-- บอกชื่อ Exchange: `String getExchangeName()`
-
-**เทคนิค:**
-- **Dependency Inversion (SOLID)** — โค้ดระดับสูง (เช่น GetCryptoPricesService) ขึ้นกับ interface นี้ ไม่ขึ้นกับ Binance โดยตรง จึงสลับหรือเพิ่ม Exchange ได้โดยไม่แก้โค้ดเดิม
-- **Open/Closed Principle** — เพิ่ม Exchange ใหม่ = สร้าง class ใหม่ที่ implement interface นี้ ไม่ต้องแก้ไฟล์เดิม
-- **Mono / Flux** — เป็น type จาก Project Reactor: Mono = ค่า 0 หรือ 1 ค่า, Flux = stream หลายค่า (ใช้กับ Reactive ทั้งหมด)
-
----
-
-#### `BinancePriceProvider.java` (Implementation)
-
-**ทำอะไร:**  
-- **รับผิดชอบแค่การคุยกับ Binance API** (Single Responsibility)
+implement `CryptoPriceProviderPort` — รับผิดชอบแค่การคุยกับ Binance API (Single Responsibility)
 - ใช้ `WebClient` เรียก `https://api.binance.com/api/v3/ticker/24hr`
 - แปลง `BinanceTicker` → `CryptoPrice` แล้วส่งออกเป็น Mono/Flux
 
 **เทคนิค:**
-- **@Component** — ให้ Spring สร้าง Bean แล้ว inject ไปให้ GetCryptoPricesService (เพราะ GetCryptoPricesService รับ `CryptoPriceProvider` ซึ่งมี implementation เดียวคือ Binance)
-- **Constructor Injection** — รับ `WebClient` กับ `crypto.symbols` จาก config (ไม่ใช้ new เอง) → ง่ายต่อการทดสอบและเปลี่ยน config
-- **WebClient (Reactive)** — เรียก HTTP แบบ non-blocking ได้ Mono/Flux
-- **Retry (reactor.util.retry.Retry)** — ถ้า request ล้มเหลว จะ retry แบบ backoff (ลองใหม่ 3 ครั้ง ห่างกัน 2 วินาที สูงสุด 10 วินาที)
+- **@Component** — ให้ Spring สร้าง Bean แล้ว inject ให้ Service
+- **Constructor Injection** — รับ `WebClient` กับ `crypto.symbols` จาก config
+- **WebClient (Reactive)** — เรียก HTTP แบบ non-blocking
+- **Retry (reactor.util.retry.Retry)** — retry แบบ backoff (3 ครั้ง ห่างกัน 2 วินาที สูงสุด 10 วินาที)
 - **timeout(Duration.ofSeconds(10))** — ถ้ารอเกิน 10 วินาทีถือว่าล้มเหลว
-- **onErrorResume** — จับ error แล้วไม่ให้ sequence ขาด (เช่น return Mono.empty()) และ log ไว้
+- **onErrorResume** — จับ error แล้วไม่ให้ sequence ขาด (return Mono.empty())
 - **map(this::mapToCryptoPrice)** — แปลง BinanceTicker เป็น CryptoPrice ใน pipeline
-- **Flux.fromIterable(symbols).flatMap(this::getPrice)** — วนดึงราคาแต่ละ symbol แบบ async แล้วรวมเป็น Flux
-
-**สรุป:** คลาสนี้เป็น “ตัวเชื่อมระหว่าง Binance กับรูปแบบ CryptoPrice” แค่ชั้นเดียว ใครอยากเพิ่ม Exchange อื่นก็สร้างคลาสใหม่ที่ implement CryptoPriceProvider โดยไม่ต้องแก้ BinancePriceProvider
+- **Flux.fromIterable(symbols).flatMap(this::getPrice)** — วนดึงราคาแต่ละ symbol แบบ async
 
 ---
 
-#### `GetCryptoPricesUseCase.java` (Interface)
+### 4.8 Infrastructure Layer — Persistence Adapter
+
+#### `PriceHistoryPersistenceAdapter.java`
 
 **ทำอะไร:**  
-กำหนดว่า “บริการดึงราคา” ต้องมี operations อะไรบ้าง:
-- ดึงราคาทุกเหรียญ / เหรียญเดียวแบบครั้งเดียว (non-blocking)
-- บอกสัญลักษณ์ที่รองรับ
+implement ทั้ง `SavePriceHistoryPort` และ `LoadPriceHistoryPort` — ใช้ JdbcTemplate เขียน SQL ตรงๆ เพื่อบันทึก/อ่าน snapshot จาก DB
 
 **เทคนิค:**
-- ฝั่ง Controller ขึ้นกับ interface นี้เท่านั้น ไม่รู้ว่า inside ใช้ Binance หรือที่อื่น (DIP)
+- **@Component** — ให้ Spring สร้าง Bean
+- **JdbcTemplate** — เขียน SQL ตรงๆ (INSERT/SELECT) ไม่ใช้ ORM
+- **Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())** — wrap JDBC blocking call ไม่ให้บล็อก Netty event loop (offload ไปรันบน elastic thread pool)
+- **onErrorResume** — จับ error ตอน save แล้วไม่ให้ flux ทั้งหมดล้มเหลว
 
 ---
 
-#### `GetCryptoPricesService.java` (Implementation)
-
-**ทำอะไร:**  
-- **Orchestration** — ไม่ไปเรียก Binance เอง แต่เรียก `CryptoPriceProvider` (ซึ่งตอนรันจริงคือ BinancePriceProvider)
-- ทำหน้าที่ “ดึงราคาครั้งเดียว” แบบ non-blocking ตามที่ Controller ขอ (ไม่มี streaming)
-
-**เทคนิค:**
-- **@Service** — Bean สำหรับ business logic
-- **Dependency Inversion** — รับ `CryptoPriceProvider` (interface) ใน constructor
-- **getAllPrices() / getPrice(symbol)** — delegate ไปที่ port โดยตรง คืนค่า Flux/Mono (non-blocking one-shot)
-
-**สรุป:** GetCryptoPricesService ไม่รู้ว่า Binance เป็นอย่างไร แค่รู้ว่า “มี provider ที่ให้ Mono/Flux ของ CryptoPrice” จึงทดสอบง่าย (mock CryptoPriceProvider) และเปลี่ยนแหล่งข้อมูลได้โดยไม่แตะโค้ดนี้
-
----
-
-### 4.4 Controller Layer — HTTP
+### 4.9 Interfaces Layer — HTTP Adapter
 
 #### `CryptoController.java`
 
 **ทำอะไร:**  
-- รับ HTTP request จาก Frontend / Client
-- ดึงราคาทุกเหรียญ / เหรียญเดียว / รายการ symbol / ประวัติ แบบ **non-blocking** (Mono/Flux) ไม่มี streaming/SSE
+รับ HTTP request จาก Frontend / Client แล้วเรียก use case — ไม่มี business logic
 
-**Endpoint สำคัญ:**
+**Endpoint:**
 
 | Method | Path | ทำอะไร |
 |--------|------|--------|
 | GET | `/api/crypto/prices` | ดึงราคาทุกเหรียญครั้งเดียว (Flux) |
 | GET | `/api/crypto/price/{symbol}` | ดึงราคาเหรียญเดียว (Mono) |
 | GET | `/api/crypto/symbols` | รายการ symbol ที่รองรับ |
-| GET | `/api/crypto/history/{symbol}` | ประวัติราคา (limit) |
-| GET | `/api/crypto/history/{symbol}/range` | ประวัติราคาช่วงเวลา |
+| GET | `/api/crypto/history/{symbol}?limit=100` | ประวัติราคาล่าสุด |
+| GET | `/api/crypto/history/{symbol}/range?from=...&to=...` | ประวัติราคาช่วงเวลา (ISO-8601) |
 
 **เทคนิค:**
-- **@RestController, @RequestMapping("/api/crypto")** — กำหนดว่าเป็น REST API ใต้ path นี้
-- **@CrossOrigin(origins = "*")** — อนุญาตให้ Frontend จาก domain อื่นเรียก API ได้ (สำหรับพัฒนา)
+- **@RestController, @RequestMapping("/api/crypto")** — กำหนดว่าเป็น REST API
+- **@CrossOrigin(origins = "*")** — อนุญาตให้ Frontend จาก domain อื่นเรียก API ได้
 - **symbol.toUpperCase() + "USDT"** — บังคับให้ symbol เป็นรูปแบบ Binance (เช่น btc → BTCUSDT)
 - คืนค่า **Flux / Mono** — non-blocking ไม่บล็อก thread
 
-**สรุป:** Controller รับผิดชอบแค่ HTTP layer (path, method, format) และ delegate logic ทั้งหมดให้ GetCryptoPricesUseCase / GetPriceHistoryUseCase (SRP)
-
 ---
 
-#### `WebController.java`
-
-**ทำอะไร:**  
-ส่งหน้าเว็บหลักเมื่อเข้า path `/` (return ชื่อ view "index" → Spring จะไปหา `index.html` ใน static)
-
-**เทคนิค:**
-- **@Controller** (ไม่ใช่ RestController) — return เป็นชื่อ view สำหรับ render หน้า HTML
-- กับ Spring Boot ที่มี static resources อยู่ที่ `static/` การ return "index" จะไปที่ `index.html` ได้ (ขึ้นกับ config)
-
----
-
-### 4.5 Config
+### 4.10 Config
 
 #### `WebClientConfig.java`
 
@@ -207,46 +305,58 @@ src/main/java/.../CryptoBoard/
    - ตั้ง response timeout 10 วินาที
    - ใช้ Reactor Netty เป็น connector
    - ตั้ง max in-memory size 16MB สำหรับ response ใหญ่
-2. **ObjectMapper** — ใช้ serialize/deserialize JSON (ถ้ามีที่อื่นในแอป)
+2. **ObjectMapper** — ใช้ serialize/deserialize JSON
 
 **เทคนิค:**
 - **@Configuration** — class นี้เป็นแหล่งกำหนด Bean
-- **@Bean** — method ที่ return object ที่ Spring จะจัดการให้ (inject ได้ทุกที่ที่ต้องการ)
+- **@Bean** — method ที่ return object ที่ Spring จะจัดการให้ (inject ได้ทุกที่)
 
 ---
 
-#### Database Config (ไม่มี config class แยก)
+#### `PriceStreamPersistence.java`
 
 **ทำอะไร:**  
-Spring Boot จัดการเชื่อมต่อ H2 ให้อัตโนมัติจาก `application.properties`:
-- **DataSource (HikariCP)** — สร้าง connection pool ไปยัง H2 file database
-- **schema.sql** — Spring Boot รัน `schema.sql` ตอนเริ่มแอปอัตโนมัติ (ตั้ง `spring.sql.init.mode=always`)
+ใช้ `@Scheduled` เรียก `getAllPrices()` เป็นระยะ แล้วแปลง CryptoPrice → PriceSnapshot แล้วบันทึกลง DB ผ่าน `SavePriceHistoryPort`
 
 **เทคนิค:**
-- **Spring Boot Auto-configuration** — ไม่ต้องเขียน config class เอง แค่ตั้งค่าใน `application.properties`
-- **HikariCP** — connection pool ที่ Spring Boot ใช้เป็น default
+- **@Component** — ให้ Spring สร้าง Bean
+- **@Scheduled(fixedDelayString = "${crypto.persistence.interval-ms:5000}")** — รันทุก N มิลลิวินาที (ค่า default 5000)
+- **เปิด/ปิดได้** ด้วย `crypto.history.enabled` (ถ้า false จะข้าม)
+- ขึ้นกับ `GetCryptoPricesUseCase` + `SavePriceHistoryPort` (interface ทั้งคู่ = DIP)
+
+---
+
+#### Database Config (Auto-configuration)
+
+Spring Boot จัดการเชื่อมต่อ H2 ให้อัตโนมัติจาก `application.properties`:
+- **DataSource (HikariCP)** — สร้าง connection pool ไปยัง H2 file database
+- **schema.sql** — Spring Boot รัน `schema.sql` ตอนเริ่มแอปอัตโนมัติ สร้างตาราง `price_snapshot`
 - Spring Boot สร้าง `JdbcTemplate` จาก DataSource ให้อัตโนมัติ
 
 ---
 
-### 4.6 การตั้งค่า
+### 4.11 การตั้งค่า
 
 #### `application.properties`
 
-**ทำอะไร:**  
-- กำหนด port, ชื่อแอป, log
-- **crypto.symbols** — รายการคู่เงินที่ต้องการดึง (เช่น BTCUSDT, ETHUSDT) **เพิ่ม/ลดได้โดยไม่ต้องแก้โค้ด (OCP)**
-- **crypto.persistence.interval-ms** — ช่วงเวลาบันทึกราคาลง DB (มิลลิวินาที เช่น 5000 = ทุก 5 วินาที)
+| การตั้งค่า | ค่า | คำอธิบาย |
+|------------|-----|----------|
+| `server.port` | `8080` | พอร์ตแอป |
+| `crypto.symbols` | `BTCUSDT,ETHUSDT,...` | รายการคู่เงินที่ดึง (เพิ่ม/ลดได้โดยไม่แก้โค้ด) |
+| `crypto.history.enabled` | `true` | เปิด/ปิดการบันทึกราคาลง DB |
+| `crypto.persistence.interval-ms` | `5000` | ช่วงเวลาบันทึกราคาลง DB (มิลลิวินาที) |
+| `spring.datasource.url` | `jdbc:h2:file:./data/cryptoboard;AUTO_SERVER=TRUE` | H2 file database ในโฟลเดอร์ `data/` |
+| `spring.sql.init.mode` | `always` | รัน schema.sql ทุกครั้งที่เริ่มแอป |
 
 ---
 
-### 4.7 Frontend
+### 4.12 Frontend
 
 #### `static/index.html`
 
 **ทำอะไร:**  
 - หน้า Dashboard แสดงการ์ดราคาแต่ละเหรียญ
-- เรียก **fetch('/api/crypto/prices')** แล้ว **setInterval** poll ซ้ำทุก N วินาที (ไม่มี SSE)
+- เรียก **fetch('/api/crypto/prices')** แล้ว **setInterval** poll ซ้ำทุก N วินาที
 - เมื่อได้ JSON array ของราคา ก็อัปเดตการ์ด (ราคา, % change, volume)
 
 **เทคนิค:**
@@ -257,15 +367,40 @@ Spring Boot จัดการเชื่อมต่อ H2 ให้อัต�
 
 ## 5. การไหลของข้อมูล (Data Flow)
 
-ทุก endpoint เป็น **non-blocking** (ดึงครั้งเดียวต่อ request ไม่มี streaming):
+### 5.1 ดึงราคา (Non-blocking, One-shot)
 
-1. Client เรียก GET `/api/crypto/prices` หรือ `/api/crypto/price/BTC`
-2. **CryptoController** เรียก `getAllPrices()` หรือ `getPrice(symbol)` ของ GetCryptoPricesUseCase
-3. **GetCryptoPricesService** เรียก `priceProvider.getAllPrices()` หรือ `getPrice(symbol)` (ไปที่ BinancePriceProvider)
-4. BinancePriceProvider เรียก Binance API (non-blocking) → แปลงเป็น CryptoPrice → ส่งกลับเป็น Flux/Mono
+```
+Client → CryptoController → GetCryptoPricesUseCase → GetCryptoPricesService → CryptoPriceProviderPort → BinancePriceProvider → Binance API
+                                                                                                                                    ↓
+Client ← CryptoController ← GetCryptoPricesService ←───────────────────────── BinancePriceProvider ← BinanceTicker → CryptoPrice (map)
+```
+
+1. Client เรียก GET `/api/crypto/prices` หรือ `/api/crypto/price/{symbol}`
+2. **CryptoController** เรียก use case
+3. **GetCryptoPricesService** เรียก `priceProvider.getAllPrices()` หรือ `getPrice(symbol)`
+4. **BinancePriceProvider** เรียก Binance API (non-blocking) → แปลง BinanceTicker → CryptoPrice
 5. Spring WebFlux แปลง Flux/Mono เป็น JSON response ให้ Client
 
-Frontend ใช้ **polling** (fetch แล้ว setInterval) เพื่ออัปเดต UI เป็นระยะ
+Frontend ใช้ **polling** (fetch + setInterval) เพื่ออัปเดต UI เป็นระยะ
+
+### 5.2 บันทึกประวัติราคาลง DB (Scheduled)
+
+```
+@Scheduled (PriceStreamPersistence) → GetCryptoPricesUseCase.getAllPrices()
+    ↓
+CryptoPrice → PriceSnapshot (map) → SavePriceHistoryPort → PriceHistoryPersistenceAdapter → H2 DB
+```
+
+1. `PriceStreamPersistence.persistPrices()` ถูกเรียกทุก 5 วินาที
+2. ดึงราคาทั้งหมดผ่าน `GetCryptoPricesUseCase`
+3. แปลง CryptoPrice → PriceSnapshot
+4. บันทึกลง DB ผ่าน `SavePriceHistoryPort` (PriceHistoryPersistenceAdapter ใช้ JdbcTemplate + Mono.fromCallable)
+
+### 5.3 ดึงประวัติราคา
+
+```
+Client → CryptoController → GetPriceHistoryUseCase → GetPriceHistoryService → LoadPriceHistoryPort → PriceHistoryPersistenceAdapter → H2 DB
+```
 
 ---
 
@@ -273,32 +408,63 @@ Frontend ใช้ **polling** (fetch แล้ว setInterval) เพื่อ�
 
 | เทคนิค | ใช้ที่ไหน | ประโยชน์ |
 |--------|-----------|----------|
-| **SOLID – SRP** | แยก Controller / Service / Provider / DTO ตามหน้าที่เดียว | แก้ไขและทดสอบง่าย |
+| **Hexagonal Architecture** | โครงสร้างทั้งโปรเจค | แยกชั้นชัดเจน เปลี่ยน adapter ได้โดยไม่กระทบ business logic |
+| **SOLID – SRP** | แยก Controller / Service / Provider / Adapter / DTO ตามหน้าที่เดียว | แก้ไขและทดสอบง่าย |
 | **SOLID – OCP** | เพิ่ม Exchange = สร้าง Provider ใหม่ + config symbols | ไม่ต้องแก้โค้ดเดิม |
-| **SOLID – DIP** | Controller ขึ้นกับ GetCryptoPricesUseCase; GetCryptoPricesService ขึ้นกับ CryptoPriceProvider (interface) | เปลี่ยน implementation ได้ ไม่ผูกกับ Binance |
+| **SOLID – LSP** | ทุก implementation ใช้แทน interface ได้ | พฤติกรรมคงเส้นคงวา |
+| **SOLID – ISP** | แยก LoadPriceHistoryPort (อ่าน) กับ SavePriceHistoryPort (เขียน) | client ใช้แค่ interface ที่ต้องการ |
+| **SOLID – DIP** | Controller ขึ้นกับ UseCase; Service ขึ้นกับ Port (ทั้งหมดเป็น interface) | เปลี่ยน implementation ได้ ไม่ผูกกับ Binance |
 | **Reactive (Mono/Flux)** | ทุกชั้นที่เกี่ยวกับ I/O | Non-blocking ไม่บล็อก thread |
 | **WebClient + Retry + Timeout** | BinancePriceProvider | ดึงข้อมูลภายนอกอย่างปลอดภัยและทนต่อความล้มเหลว |
-| **JDBC + Mono.fromCallable** | PriceHistoryPersistenceAdapter | เขียน/อ่าน DB ด้วย JdbcTemplate + wrap Mono.fromCallable ไม่บล็อก event loop |
-| **Polling (fetch + setInterval)** | index.html | Frontend ดึงราคาซ้ำเป็นระยะ ไม่ใช้ SSE |
-| **DTO แยก (CryptoPrice vs BinanceTicker)** | dto package | รูปแบบข้อมูลภายในไม่ยึดติดกับ Binance |
-| **Constructor Injection** | ทุก Service / Controller | ทดสอบด้วย mock ได้ง่าย และ dependencies ชัดเจน |
-
-### ตรวจ SOLID (หลัง refactor ประวัติราคา)
-
-| หลัก | สถานะ | รายละเอียด |
-|------|--------|------------|
-| **S – Single Responsibility** | ผ่าน | แต่ละคลาสมีหน้าที่เดียว: Controller=HTTP, GetCryptoPricesService=orchestration, Provider=ดึงข้อมูล, GetPriceHistoryService=query, PriceStreamPersistence=scheduled บันทึก |
-| **O – Open/Closed** | ผ่าน | เพิ่ม Exchange = สร้าง Provider ใหม่; เพิ่ม persistence = สร้าง Writer/Reader implementation ไม่แก้โค้ดเดิม |
-| **L – Liskov Substitution** | ผ่าน | ไม่มี subtype ที่แทนที่แล้วทำพฤติกรรมผิด (ทุก implementation ใช้แทน interface ได้) |
-| **I – Interface Segregation** | ผ่าน | แยก LoadPriceHistoryPort (อ่าน) กับ SavePriceHistoryPort (เขียน) — client ใช้แค่ interface ที่ต้องการ |
-| **D – Dependency Inversion** | ผ่าน | Controller ขึ้นกับ GetCryptoPricesUseCase + GetPriceHistoryUseCase; PriceStreamPersistence ขึ้นกับ GetCryptoPricesUseCase + SavePriceHistoryPort; GetCryptoPricesService ขึ้นกับ CryptoPriceProvider (ทั้งหมดเป็น interface) |
+| **JDBC + Mono.fromCallable** | PriceHistoryPersistenceAdapter | เขียน/อ่าน DB ด้วย JdbcTemplate + ไม่บล็อก event loop |
+| **Polling (fetch + setInterval)** | index.html | Frontend ดึงราคาซ้ำเป็นระยะ |
+| **DTO แยก (CryptoPrice vs BinanceTicker)** | application.dto / infrastructure.external | รูปแบบข้อมูลภายในไม่ยึดติดกับ Binance |
+| **Constructor Injection** | ทุก Service / Controller / Adapter | ทดสอบด้วย mock ได้ง่าย dependencies ชัดเจน |
 
 ---
 
-## 7. ถ้าอยากขยายโปรเจค
+## 7. SOLID Checklist
+
+| หลัก | สถานะ | รายละเอียด |
+|------|--------|------------|
+| **S – Single Responsibility** | ผ่าน | แต่ละคลาสมีหน้าที่เดียว: Controller=HTTP, Service=orchestration, Provider=ดึงข้อมูล, PersistenceAdapter=DB, PriceStreamPersistence=scheduled บันทึก |
+| **O – Open/Closed** | ผ่าน | เพิ่ม Exchange = สร้าง Provider ใหม่; เพิ่ม persistence = สร้าง Adapter ใหม่ ไม่แก้โค้ดเดิม |
+| **L – Liskov Substitution** | ผ่าน | ทุก implementation ใช้แทน interface ได้ ไม่มี subtype ที่ทำพฤติกรรมผิด |
+| **I – Interface Segregation** | ผ่าน | แยก LoadPriceHistoryPort (อ่าน) กับ SavePriceHistoryPort (เขียน) |
+| **D – Dependency Inversion** | ผ่าน | Controller ขึ้นกับ UseCase (port in); Service ขึ้นกับ Port (port out) — ทั้งหมดเป็น interface |
+
+---
+
+## 8. การเก็บ Database (ประวัติราคา)
+
+### ทำไมใช้ JDBC แทน R2DBC?
+
+R2DBC บน Spring Boot 4.x มีปัญหา **dialect resolution** — ระบบ resolve dialect ผิด ทำให้เกิด error แก้ยากเพราะ auto-configuration หลายชั้น
+
+การใช้ JDBC + `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())`:
+- **ไม่บล็อก event loop** — JDBC blocking ถูก offload ไปรันบน elastic thread pool แยก
+- ง่าย dependency น้อย ไม่มีปัญหา dialect
+- ควบคุม SQL ได้เต็มที่ ไม่ต้องพึ่ง ORM
+
+### ตาราง `price_snapshot` (schema.sql)
+
+| Column | Type | คำอธิบาย |
+|--------|------|----------|
+| `id` | BIGINT AUTO_INCREMENT | Primary Key |
+| `symbol` | VARCHAR | สัญลักษณ์ เช่น BTCUSDT |
+| `price` | VARCHAR | ราคา |
+| `change_24h` | VARCHAR | % เปลี่ยนแปลง 24 ชม. |
+| `volume_24h` | VARCHAR | Volume 24 ชม. |
+| `recorded_at` | TIMESTAMP | เวลาที่บันทึก |
+
+Index: `idx_price_snapshot_symbol`, `idx_price_snapshot_recorded_at`
+
+---
+
+## 9. ถ้าอยากขยายโปรเจค
 
 - **เพิ่ม Exchange อื่น (เช่น CoinGecko):**  
-  สร้าง `CoinGeckoPriceProvider` implement `CryptoPriceProvider` แล้วสร้าง DTO ตรงกับ API ของ CoinGecko จากนั้นเลือกใช้ provider ไหนผ่าน config หรือ Profile (เช่น @Primary / @Qualifier)
+  สร้าง `CoinGeckoPriceProvider` implement `CryptoPriceProviderPort` + สร้าง DTO ตรงกับ API ของ CoinGecko จากนั้นเลือกใช้ provider ไหนผ่าน config (@Primary / @Qualifier)
 
 - **เพิ่มเหรียญ:**  
   แก้ใน `application.properties` ที่ `crypto.symbols` เท่านั้น ไม่ต้องแก้โค้ด
@@ -306,45 +472,22 @@ Frontend ใช้ **polling** (fetch แล้ว setInterval) เพื่อ�
 - **เปลี่ยนช่วงเวลาบันทึกราคาลง DB:**  
   แก้ `crypto.persistence.interval-ms` ใน application.properties
 
-ถ้าอ่านครบแล้ว จะเห็นว่าโปรเจคออกแบบให้แต่ละชั้นรับผิดชอบชัดเจน ใช้ interface เป็นสัญญา และใช้ Reactive (Mono/Flux) แบบ non-blocking ตลอดสาย ดังนั้นถ้าเข้าใจแต่ละคลาสและ flow นี้ จะต่อยอดหรือสอนคนอื่นได้ง่ายครับ
+- **ปิดการบันทึกประวัติ:**  
+  ตั้ง `crypto.history.enabled=false`
 
 ---
 
-## 8. การเก็บ Database (ประวัติราคา)
+## 10. Test
 
-โปรเจครองรับการเก็บ snapshot ราคาลงฐานข้อมูลเพื่อใช้ดูประวัติหรือทำกราฟ
+โปรเจคมี unit test ครอบคลุมชั้นหลัก:
 
-### สิ่งที่ใช้
+| Test Class | ทดสอบอะไร |
+|------------|-----------|
+| `GetCryptoPricesServiceTest` | Service orchestration (mock CryptoPriceProviderPort) |
+| `CryptoControllerTest` | HTTP layer (mock UseCase) |
+| `BinancePriceProviderTest` | Binance adapter (mock WebClient) |
+| `CryptoPriceTest` | DTO constructor, getter/setter, toString |
+| `BinanceTickerTest` | DTO deserialization จาก JSON |
+| `CryptoBoardApplicationTests` | Context loading |
 
-| สิ่งที่ใช้ | หน้าที่ |
-|-------------|--------|
-| **spring-boot-starter-jdbc** + **h2** | JDBC + H2 file database เก็บข้อมูลในโฟลเดอร์ `data/` |
-| **JdbcTemplate** | เขียน SQL ตรงๆ (INSERT/SELECT) wrap ด้วย `Mono.fromCallable` ไม่บล็อก event loop |
-| **Domain: PriceSnapshot** | Domain entity สำหรับ snapshot ราคา (symbol, price, change_24h, volume_24h, recorded_at) |
-| **Adapter: PriceHistoryPersistenceAdapter** | ใช้ JdbcTemplate เขียน SQL ตรงๆ + wrap Mono.fromCallable เพื่อบันทึก/อ่าน snapshot จาก DB — implement ทั้ง SavePriceHistoryPort และ LoadPriceHistoryPort |
-| **Config: PriceStreamPersistence** | ใช้ @Scheduled เรียก getAllPrices() เป็นระยะ แล้วบันทึก snapshot ลง DB แบบ non-blocking (ปิดได้ด้วย `crypto.history.enabled=false`) |
-| **schema.sql** | Spring Boot รันอัตโนมัติตอนเริ่มแอป สร้างตาราง `price_snapshot` ถ้ายังไม่มี |
-| **API: GET /api/crypto/history/{symbol}?limit=100** | ดึงประวัติราคาล่าสุด (สำหรับกราฟ) |
-| **API: GET /api/crypto/history/{symbol}/range?from=...&to=...** | ดึงประวัติในช่วงเวลา (from/to เป็น ISO-8601) |
-
-### ทำไมใช้ JDBC แทน R2DBC?
-
-R2DBC บน Spring Boot 4.x มีปัญหา **dialect resolution** — ระบบ resolve dialect ผิด ทำให้เกิด "bad SQL grammar" error แก้ยากเพราะ auto-configuration หลายชั้น
-
-การใช้ JDBC + `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())`:
-- **ไม่บล็อก event loop** — JDBC blocking ถูก offload ไปรันบน elastic thread pool แยก
-- ง่าย dependency น้อย ไม่มีปัญหา dialect
-- ควบคุม SQL ได้เต็มที่ ไม่ต้องพึ่ง ORM
-
-### Config ที่เกี่ยวข้อง (application.properties)
-
-- `spring.datasource.url=jdbc:h2:file:./data/cryptoboard;AUTO_SERVER=TRUE` — เก็บข้อมูลในไฟล์ใต้โฟลเดอร์ `data/`
-- `spring.sql.init.mode=always` — รัน schema.sql ทุกครั้งที่เริ่มแอป
-- `crypto.history.enabled=true` — เปิด/ปิดการบันทึกราคาลง DB (scheduled)
-
-### เทคนิคที่ใช้ (รวม SOLID)
-
-- **JDBC + Mono.fromCallable** — ใช้ JdbcTemplate เขียน SQL ตรงๆ แล้ว wrap ด้วย `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())` เพื่อไม่บล็อก Netty event loop  
-- **แยกชั้น persistence** — การบันทึกอยู่ที่ PriceHistoryPersistenceAdapter และ PriceStreamPersistence ไม่ปนกับ GetCryptoPricesService  
-- **บันทึกแบบ scheduled** — ใช้ `@Scheduled` เรียก getAllPrices() เป็นระยะ แล้ว saveAll() ลง DB แบบ non-blocking  
-- **DIP + ISP** — Controller ขึ้นกับ `LoadPriceHistoryPort` (อ่านประวัติ), PriceStreamPersistence ขึ้นกับ `SavePriceHistoryPort` (เขียนประวัติ) ไม่ขึ้นกับ concrete PriceHistoryPersistenceAdapter โดยตรง
+ใช้ **Mockito** + **JUnit 5** + **@ParameterizedTest** สำหรับทดสอบหลาย case
