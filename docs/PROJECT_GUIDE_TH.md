@@ -11,6 +11,7 @@
 - API ดึงราคาแบบ **non-blocking** (Mono/Flux) Frontend ใช้ polling อัปเดตเป็นระยะ
 - มี REST API สำหรับดึงราคาแบบครั้งเดียวด้วย
 - เก็บ snapshot ราคาลง H2 Database เพื่อดูประวัติ
+- **ระบบ Login แบบ JWT** — API ราคา (/api/crypto/*) ต้องส่ง Header `Authorization: Bearer <token>` ถึงจะเข้าได้
 
 ---
 
@@ -24,6 +25,7 @@
 | Database | **JDBC + H2** (JdbcTemplate) | เขียน/อ่าน DB ด้วย SQL ตรงๆ wrap Mono.fromCallable ไม่บล็อก event loop |
 | JSON | **Jackson** | แปลง JSON ↔ Java Object |
 | Frontend | HTML + CSS + JavaScript | หน้า Dashboard + polling ราคา |
+| Auth | **Spring Security (Reactive) + JWT (jjwt)** | Login/Register, ป้องกัน /api/crypto/* ด้วย Bearer token |
 
 **ทำไมใช้ WebFlux ไม่ใช่ Spring MVC?**
 - WebFlux เป็น **Non-blocking** เหมาะกับงานที่รอ I/O บ่อย (เรียก API ภายนอก, Stream)
@@ -474,6 +476,16 @@ Index: `idx_price_snapshot_symbol`, `idx_price_snapshot_recorded_at`
 
 - **ปิดการบันทึกประวัติ:**  
   ตั้ง `crypto.history.enabled=false`
+
+---
+
+## 9.1 ระบบ Login (JWT)
+
+- **ลงทะเบียน:** `POST /api/auth/register` body `{"username":"...", "password":"..."}`
+- **ล็อกอิน:** `POST /api/auth/login` body `{"username":"...", "password":"..."}` → ได้ `token` และ `type: "Bearer"`
+- **เรียก API ราคา:** ส่ง Header `Authorization: Bearer <token>` ทุก request ไปที่ `/api/crypto/*`
+- ผู้ใช้ทดสอบ (สร้างอัตโนมัติเมื่อ start): **demo** / **demo123**
+- ตั้งค่า JWT ใน `application.properties`: `jwt.secret`, `jwt.expiration-ms`
 
 ---
 
