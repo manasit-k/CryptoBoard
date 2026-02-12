@@ -41,33 +41,39 @@
 src/main/java/com/demo/crypto/CryptoBoard/
 ├── CryptoBoardApplication.java              → จุดเข้าแอป (main)
 ├── domain/                                  → Domain Entity (pure POJO ไม่พึ่ง framework)
-│   └── PriceSnapshot.java
+│   ├── PriceSnapshot.java
+│   └── User.java                           → ผู้ใช้ (Login/Register)
 ├── application/                             → Application Layer (use case + port + dto)
 │   ├── dto/
-│   │   └── CryptoPrice.java                → DTO ราคาภายในระบบ
+│   │   ├── CryptoPrice.java                → DTO ราคาภายในระบบ
+│   │   ├── LoginRequest.java, LoginResponse.java, RegisterRequest.java
 │   ├── port/
-│   │   ├── in/                             → Inbound Ports (use case interface)
-│   │   │   ├── GetCryptoPricesUseCase.java
-│   │   │   └── GetPriceHistoryUseCase.java
-│   │   └── out/                            → Outbound Ports (infrastructure interface)
-│   │       ├── CryptoPriceProviderPort.java
-│   │       ├── LoadPriceHistoryPort.java
-│   │       └── SavePriceHistoryPort.java
-│   └── service/                            → Use Case Implementation
-│       ├── GetCryptoPricesService.java
-│       └── GetPriceHistoryService.java
-├── infrastructure/                          → Adapter สำหรับเชื่อมต่อภายนอก
-│   ├── external/                           → External API Adapter
-│   │   ├── BinancePriceProvider.java
-│   │   └── BinanceTicker.java
-│   └── persistence/                        → Database Adapter
-│       └── PriceHistoryPersistenceAdapter.java
-├── interfaces/                              → Inbound Adapter (HTTP)
-│   └── web/
-│       └── CryptoController.java
-└── config/                                  → Configuration
-    ├── WebClientConfig.java
-    └── PriceStreamPersistence.java
+│   │   ├── in/
+│   │   │   ├── GetCryptoPricesUseCase.java, GetPriceHistoryUseCase.java
+│   │   │   ├── LoginUseCase.java, RegisterUseCase.java
+│   │   └── out/
+│   │       ├── CryptoPriceProviderPort.java, LoadPriceHistoryPort.java, SavePriceHistoryPort.java
+│   │       ├── LoadUserPort.java, SaveUserPort.java
+│   │       ├── TokenProviderPort.java, TokenValidatorPort.java, PasswordEncoderPort.java
+│   └── service/
+│       ├── GetCryptoPricesService.java, GetPriceHistoryService.java
+│       ├── LoginService.java, RegisterService.java
+├── infrastructure/
+│   ├── external/
+│   │   ├── BinancePriceProvider.java, BinanceTicker.java
+│   ├── persistence/
+│   │   ├── PriceHistoryPersistenceAdapter.java
+│   │   └── UserPersistenceAdapter.java
+│   └── security/                           → JWT + BCrypt
+│       ├── JwtAdapter.java, BCryptPasswordAdapter.java
+├── interfaces/web/
+│   ├── CryptoController.java
+│   ├── AuthController.java                 → Login / Register API
+│   └── GlobalExceptionHandler.java
+└── config/
+    ├── WebClientConfig.java, PriceStreamPersistence.java
+    ├── SecurityConfig.java                 → WebFlux + JWT filter
+    └── DataInitializer.java                → สร้าง user demo
 ```
 
 **หลักการ:**
@@ -496,7 +502,10 @@ Index: `idx_price_snapshot_symbol`, `idx_price_snapshot_recorded_at`
 | Test Class | ทดสอบอะไร |
 |------------|-----------|
 | `GetCryptoPricesServiceTest` | Service orchestration (mock CryptoPriceProviderPort) |
-| `CryptoControllerTest` | HTTP layer (mock UseCase) |
+| `CryptoControllerTest` | HTTP layer ราคา (mock UseCase) |
+| `LoginServiceTest` | Login use case (mock LoadUser, PasswordEncoder, TokenProvider) |
+| `RegisterServiceTest` | Register use case (mock LoadUser, SaveUser, PasswordEncoder) |
+| `AuthControllerTest` | Login/Register API (mock LoginUseCase, RegisterUseCase) |
 | `BinancePriceProviderTest` | Binance adapter (mock WebClient) |
 | `CryptoPriceTest` | DTO constructor, getter/setter, toString |
 | `BinanceTickerTest` | DTO deserialization จาก JSON |
